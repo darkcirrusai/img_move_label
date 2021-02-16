@@ -35,8 +35,7 @@ input[type=submit] {
 }
 
 .center {
-  display: block;
-  margin-left: 3in;
+  margin-left: 4in;
   margin-right: auto;
-  width: 70%;
+  width: 30%;
 }

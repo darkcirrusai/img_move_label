@@ -10,12 +10,15 @@
 <body>
     <h1 style="text-align: center;">Move Image to Designated Folder</h1>
     <div>
+        <p>{{resp}}</p>
+    </div>
+    <div>
         <h4 style="text-align: center;">{{File}}</h4>
-        <img src="../static/{{filename}}" height="300" width="600" class="center">
+        <img src="../static/sample_img/{{image}}" class="center">
     </div>
     </div>
     <div class="horizontal-center">
-        <form enctype=multipart/form-data action="/0" method="POST">
+        <form enctype=text action="/0" method="POST">
             <input type="submit" value="0">
         <form enctype=multipart/form-data action="/1" method="POST">
             <input type="submit" value="1">
