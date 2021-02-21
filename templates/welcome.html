@@ -1,24 +1,22 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Image Move</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="../static/styles.css">
+    <link rel="stylesheet" href="../static/master.css">
+    <title>Image Move</title>
 </head>
 
 <body>
-    <!--
-    <h1 style="text-align: center;">Move Image to Designated Folder</h1>
-    <h4>{{pic_rem}}</h4>
-    -->
-        <div class="split left">
+    <div class="split left">
+        <h1 style="text-align: center;">Move Image to Designated Folder</h1>
+        <h4 style="text-align: center;">{{pic_rem}}</h4>
             <div class="centered">
             <h4 style="text-align: center;">{{File}}</h4>
-            <img src="../static/sample_img/{{image}}" height="500" class="center">
+            <img src="../static/sample_img/{{image}}" class="centered img">
             </div>
-        </div>
-        <div class="split right">
-            <div class="centered">
+    </div>
+    <div class="split right">
+        <div class="centered">
             <form action="/img/value" method="GET">
                 <label for="label">Label</label><br>
                 <input type="text" id="label" name="label"><br><br>
@@ -26,8 +24,8 @@
                 <input type="text" id="name" name="name" value="{{image}}"><br>
                 <input type="submit" value="Submit">
             </form>
-            </div>
         </div>
+    </div>
 
 </body>
 </html>

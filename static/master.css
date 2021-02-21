@@ -1,6 +1,6 @@
 body {
   font-family: Arial;
-  color: white;
+  color: black;
 }
 
 .split {
@@ -15,12 +15,12 @@ body {
 
 .left {
   left: 0;
-  background-color: gray;
+  background-color: lightgray;
 }
 
 .right {
   right: 0;
-  background-color: lightslategrey;
+  background-color: green;
 }
 
 .centered {
@@ -32,5 +32,5 @@ body {
 }
 
 .centered img {
-  width: 500px;
+  width: 250px;
 }
