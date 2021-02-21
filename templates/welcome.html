@@ -1,25 +1,33 @@
+<!DOCTYPE html>
 <html>
 <head>
     <title>Image Move</title>
-    <script src='../static/client.js'></script>
-    <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
-    <script src="http://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="../static/styles.css">
 </head>
 
 <body>
+    <!--
     <h1 style="text-align: center;">Move Image to Designated Folder</h1>
     <h4>{{pic_rem}}</h4>
-    <div>
-        <h4 style="text-align: center;">{{File}}</h4>
-        <img src="../static/sample_img/{{image}}" height="500" class="center">
-    </div>
-    <form action="/img/value" method="GET">
-        <label for="label">Label</label><br>
-        <input type="text" id="label" name="label"><br><br>
-        <label for="name">Image Name:</label><br>
-        <input type="text" id="name" name="name" value="{{image}}"><br>
-        <input type="submit" value="Submit">
-    </form>
+    -->
+        <div class="split left">
+            <div class="centered">
+            <h4 style="text-align: center;">{{File}}</h4>
+            <img src="../static/sample_img/{{image}}" height="500" class="center">
+            </div>
+        </div>
+        <div class="split right">
+            <div class="centered">
+            <form action="/img/value" method="GET">
+                <label for="label">Label</label><br>
+                <input type="text" id="label" name="label"><br><br>
+                <label for="name">Image Name:</label><br>
+                <input type="text" id="name" name="name" value="{{image}}"><br>
+                <input type="submit" value="Submit">
+            </form>
+            </div>
+        </div>
+
 </body>
 </html>

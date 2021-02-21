@@ -1,41 +1,37 @@
 body {
-  background-color: lightgray;
-  color: black;
-}
-
-/* Style inputs, select elements and textareas */
-input[type=text], select, textarea{
-  width: 100%;
-  padding: 12px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  box-sizing: border-box;
-  resize: vertical;
-}
-
-/* Style the label to display next to the inputs */
-label {
-  padding: 12px 12px 12px 0;
-  display: inline-block;
-}
-
-/* Style the submit button */
-input[type=submit] {
-  background-color: #111311;
+  font-family: Arial;
   color: white;
-  padding: 20px;
-  cursor: pointer;
-  position: relative;
 }
 
-.horizontal-center {
-  margin: 0;
+.split {
+  height: 100%;
+  width: 50%;
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  overflow-x: hidden;
+  padding-top: 20px;
+}
+
+.left {
+  left: 0;
+  background-color: #111;
+}
+
+.right {
+  right: 0;
+  background-color: lightgray;
+}
+
+.centered {
   position: absolute;
-  left: 40%;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
 }
 
-.center {
-  margin-left: 4in;
-  margin-right: auto;
-  width: 30%;
+.centered img {
+  width: 150px;
+  border-radius: 50%;
 }
