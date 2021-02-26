@@ -9,7 +9,7 @@ from fastapi.templating import Jinja2Templates
 import shutil, os
 
 UPLOAD_FOLDER = 'uploads'
-image_folder = 'static/sample_img'
+image_folder = 'static/cat_1'
 
 # 2. Create app and model objects
 app = FastAPI()
