@@ -31,9 +31,9 @@ def move(item_id: str, request: Request):
     pic_name = val["name"]
 
     upload_path = "./uploads/"+label+"/"+pic_name
-    image_path = 'static/sample_img/'+pic_name
+    image_path = 'static/cat_1/'+pic_name
 
-    pic_rem = len(os.listdir('static/sample_img'))
+    pic_rem = len(os.listdir('static/cat_1'))
 
     shutil.move(image_path, upload_path)
     
