@@ -33,10 +33,17 @@ def move(item_id: str, request: Request):
     upload_path = "./uploads/"+label+"/"+pic_name
     image_path = 'static/cat_1/'+pic_name
 
+    # folders for individual grade
+    pic4 = len(os.listdir('./uploads/0'))
+    pic5 = len(os.listdir('./uploads/1'))
+    pic6 = len(os.listdir('./uploads/2'))
+    pic7 = len(os.listdir('./uploads/3'))
+
     pic_rem = len(os.listdir('static/cat_1'))
 
     shutil.move(image_path, upload_path)
     
     img_list = os.listdir(image_folder)
     return templates.TemplateResponse("welcome.html", 
-    {"request": request, "image":img_list[0], "pic_rem":pic_rem})
+    {"request": request, "image":img_list[0], "pic_rem":pic_rem,
+    "pic4":pic4, "pic5":pic5, "pic6":pic6, "pic7":pic7,})

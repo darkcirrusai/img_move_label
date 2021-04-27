@@ -8,20 +8,24 @@
 
 <body>
     <div class="split left">
-        <h3 style="text-align: center;">Move Image to Designated Folder</h3>
+        <h3 style="text-align: center;">Move Image to Designated Folder</h3><br>
+        <h3 style="text-align: center;">{{pic_rem}}</h3><br>
             <div class="centered">
             <h4 style="text-align: center;">{{File}}</h4>
             <img src="../static/cat_1/{{image}}" class="centered img">
             </div>
     </div>
     <div class="split right">
-        <h3 style="text-align: center;">{{pic_rem}}</h3>
+        <h3 style="text-align: center;">Cat0: {{pic4}}</h3>
+        <h3 style="text-align: center;">Cat1: {{pic5}}</h3>
+        <h3 style="text-align: center;">Cat2: {{pic6}}</h3>
+        <h3 style="text-align: center;">Cat3: {{pic7}}</h3><br>
         <div class="centered">
             <form action="/img/value" method="GET">
-                <label for="label">Label</label><br>
-                <input type="text" id="label" name="label" value="0"><br><br>
                 <label for="name">Image Name:</label><br>
-                <input type="text" id="name" name="name" value="{{image}}"><br>
+                <input type="text" id="name" name="name" value="{{image}}" autofocus><br><br>
+                <label for="label">Label</label><br>
+                <input type="text" id="label" name="label" value="1" ><br><br>
                 <input type="submit" value="Submit">
             </form>
         </div>
