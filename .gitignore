@@ -11,3 +11,4 @@ __pycache__
 # don't load folders
 source_files
 sorted_files
+.idea
