@@ -6,3 +6,9 @@ __pycache__
 *.jpg
 *.png
 *.jpeg
+
+
+# don't load folders
+source_files
+sorted_files
+.idea

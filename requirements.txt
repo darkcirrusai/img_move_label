@@ -1,0 +1,9 @@
+aiofiles==0.8.0
+fastapi==0.86.0
+Jinja2==3.1.2
+Pillow==9.2.0
+pydantic==1.10.2
+python-multipart==0.0.5
+uvicorn==0.18.2
+watchgod==0.8
+Werkzeug==1.0.1
