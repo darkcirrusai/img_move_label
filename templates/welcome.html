@@ -12,6 +12,33 @@
             Switch to Object Detection →
         </a>
     </div>
+    <div style="position: fixed; top: 8px; left: 12px; z-index: 10;">
+        <form id="upload-form" enctype="multipart/form-data" style="display:inline;">
+            <label for="upload-input" style="background:#16a34a;color:#fff;padding:6px 12px;border-radius:4px;font-family:Arial;font-size:13px;cursor:pointer;">
+                ⬆ Upload Images
+            </label>
+            <input id="upload-input" type="file" name="files" accept="image/*" multiple style="display:none;">
+        </form>
+        <span id="upload-status" style="font-family:Arial;font-size:12px;margin-left:8px;"></span>
+        <script>
+            document.getElementById('upload-input').addEventListener('change', async function() {
+                const form = new FormData();
+                for (const file of this.files) form.append('files', file);
+                const status = document.getElementById('upload-status');
+                status.textContent = 'Uploading…';
+                try {
+                    const res = await fetch('/upload', {method: 'POST', body: form});
+                    const data = await res.json();
+                    if (res.ok) {
+                        status.textContent = `✓ Uploaded ${data.uploaded.length} file(s). Reloading…`;
+                        setTimeout(() => location.reload(), 800);
+                    } else {
+                        status.textContent = `Error: ${data.detail}`;
+                    }
+                } catch(e) { status.textContent = 'Upload failed.'; }
+            });
+        </script>
+    </div>
     <div class="split left">
         <h3 style="text-align: center;">Move Image to Designated Folder</h3><br>
         <h3 style="text-align: center;">{{pic_rem}}</h3><br>

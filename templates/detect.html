@@ -24,6 +24,11 @@
         <aside class="sidebar">
             <h3>Images</h3>
             <input type="text" id="image-filter" placeholder="Filter by name…">
+            <select id="annotated-filter">
+                <option value="all">All</option>
+                <option value="labelled">Labelled</option>
+                <option value="unlabelled">Unlabelled</option>
+            </select>
             <ul id="image-list"></ul>
         </aside>
 
@@ -81,6 +86,33 @@
                     Leave blank to use a locally installed torchvision Faster R-CNN
                     (falls back only if torchvision is available).
                 </p>
+            </section>
+
+            <section>
+                <h3>Upload images</h3>
+                <label for="upload-input" style="display:inline-block;background:#16a34a;color:#fff;padding:6px 12px;border-radius:4px;font-size:13px;cursor:pointer;">
+                    ⬆ Upload Images
+                </label>
+                <input id="upload-input" type="file" accept="image/*" multiple style="display:none;">
+                <p id="upload-status" class="hint-text"></p>
+                <script>
+                    document.getElementById('upload-input').addEventListener('change', async function() {
+                        const form = new FormData();
+                        for (const file of this.files) form.append('files', file);
+                        const status = document.getElementById('upload-status');
+                        status.textContent = 'Uploading…';
+                        try {
+                            const res = await fetch('/upload', {method: 'POST', body: form});
+                            const data = await res.json();
+                            if (res.ok) {
+                                status.textContent = `✓ Uploaded ${data.uploaded.length} file(s).`;
+                                await loadImages();
+                            } else {
+                                status.textContent = `Error: ${data.detail}`;
+                            }
+                        } catch(e) { status.textContent = 'Upload failed.'; }
+                    });
+                </script>
             </section>
 
             <section>

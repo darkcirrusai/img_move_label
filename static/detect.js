@@ -66,10 +66,16 @@ async function loadImages() {
 
 function renderImageList() {
     const filter = el("image-filter").value.trim().toLowerCase();
+    const annotatedFilter = el("annotated-filter") ? el("annotated-filter").value : "all";
     const list = el("image-list");
     list.innerHTML = "";
     state.images
         .filter((img) => !filter || img.name.toLowerCase().includes(filter))
+        .filter((img) => {
+            if (annotatedFilter === "labelled") return img.annotated;
+            if (annotatedFilter === "unlabelled") return !img.annotated;
+            return true;
+        })
         .forEach((img) => {
             const li = document.createElement("li");
             li.textContent = img.name;
@@ -429,6 +435,7 @@ el("clear-btn").addEventListener("click", clearAll);
 el("prev-btn").addEventListener("click", () => nextImage(-1));
 el("next-btn").addEventListener("click", () => nextImage(1));
 el("image-filter").addEventListener("input", renderImageList);
+el("annotated-filter").addEventListener("change", renderImageList);
 
 // ---------------------------------------------------------------------------
 // Auto-annotation

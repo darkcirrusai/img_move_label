@@ -1,20 +1,22 @@
 
 # 1. Library imports
+import base64
 import csv
 import io
 import json
 import os
 import shutil
 import time
-import uuid
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from xml.dom import minidom
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from PIL import Image
@@ -51,8 +53,8 @@ async def read_root(request: Request):
         next_img = img_list[0]
     except IndexError:
         next_img = 'no images found in the folder'
-    return templates.TemplateResponse("welcome.html",
-                                      {"request": request, "image": next_img, "pic_rem": pic_rem})
+    return templates.TemplateResponse(request, "welcome.html",
+                                      {"image": next_img, "pic_rem": pic_rem})
 
 
 @app.get("/img/{item_id}")
@@ -77,9 +79,28 @@ def move(item_id: str, request: Request):
 
     img_list = _list_images(image_folder)
     next_img = img_list[0] if img_list else 'no images found in the folder'
-    return templates.TemplateResponse("welcome.html",
-                                      {"request": request, "image": next_img, "pic_rem": pic_rem,
+    return templates.TemplateResponse(request, "welcome.html",
+                                      {"image": next_img, "pic_rem": pic_rem,
                                        "pic4": postive_cat, "pic5": negative_cat})
+
+
+@app.post("/upload")
+async def upload_images(files: List[UploadFile] = File(...)):
+    saved = []
+    for file in files:
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if ext not in IMAGE_EXTS:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.filename}")
+        base = os.path.splitext(os.path.basename(file.filename))[0]
+        dest = os.path.join(image_folder, os.path.basename(file.filename))
+        counter = 1
+        while os.path.exists(dest):
+            dest = os.path.join(image_folder, f"{base}_{counter}{ext}")
+            counter += 1
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved.append(os.path.basename(dest))
+    return {"uploaded": saved}
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +158,7 @@ def _read_annotation(image_name: str) -> Dict[str, Any]:
         return json.load(fh)
 
 
-def _image_dimensions(image_name: str) -> (int, int):
+def _image_dimensions(image_name: str) -> tuple[int, int]:
     path = os.path.join(image_folder, image_name)
     with Image.open(path) as img:
         return img.size  # (width, height)
@@ -150,9 +171,9 @@ async def detect_page(request: Request):
         1 for name in images if os.path.exists(_annotation_path(name))
     )
     return templates.TemplateResponse(
+        request,
         "detect.html",
         {
-            "request": request,
             "images": images,
             "total": len(images),
             "annotated": annotated,
@@ -200,10 +221,10 @@ def api_save_annotation(payload: AnnotationPayload):
             pass
     data = {
         "image": payload.image,
-        "boxes": [b.dict() for b in payload.boxes],
+        "boxes": [b.model_dump() for b in payload.boxes],
         "image_width": payload.image_width,
         "image_height": payload.image_height,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
     }
     with open(_annotation_path(payload.image), "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
@@ -255,11 +276,14 @@ def api_auto_annotate(payload: AutoAnnotateRequest):
     if not os.path.exists(image_path):
         raise HTTPException(status_code=404, detail="image not found")
 
-    endpoint = payload.endpoint or _load_config().get("auto_endpoint")
+    endpoint = payload.endpoint or _load_config().get("auto_endpoint") or os.getenv("MODEL_URL")
 
     if endpoint:
         try:
-            boxes = _remote_detect(image_path, endpoint, payload.threshold)
+            if "/v1/models/" in endpoint:
+                boxes = _tfserving_detect(image_path, endpoint, payload.threshold)
+            else:
+                boxes = _remote_detect(image_path, endpoint, payload.threshold)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
                                 detail=f"remote model failed: {exc}")
@@ -277,6 +301,48 @@ def api_auto_annotate(payload: AutoAnnotateRequest):
                                 detail=f"local model failed: {exc}")
 
     return {"boxes": boxes}
+
+
+_CUTTER_CLASS_LABELS = {1: "nozzles", 3: "cutter", 4: "ro"}
+
+
+def _tfserving_detect(image_path: str, endpoint: str, threshold: float) -> List[Dict[str, Any]]:
+    """Send a prediction request in TFServing base64-JSON format and parse the response."""
+    import requests
+    with open(image_path, "rb") as fh:
+        encoded = base64.b64encode(fh.read()).decode("utf-8")
+    key = os.path.basename(image_path)
+    payload = {
+        "instances": [{"image_bytes": {"b64": encoded}, "key": key}]
+    }
+    resp = requests.post(endpoint, data=json.dumps(payload), timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        pred = data["predictions"][0]
+    except (KeyError, IndexError):
+        return []
+    with Image.open(image_path) as img:
+        img_w, img_h = img.size
+    boxes = []
+    det_boxes = pred.get("detection_boxes", [])
+    det_scores = pred.get("detection_scores", [])
+    det_classes_text = pred.get("detection_classes_as_text", [])
+    det_classes = pred.get("detection_classes", [])
+    labels = det_classes_text if det_classes_text else [
+        _CUTTER_CLASS_LABELS.get(int(c), f"class_{int(c)}") for c in det_classes
+    ]
+    for box, score, label in zip(det_boxes, det_scores, labels):
+        score = float(score)
+        if score < threshold:
+            continue
+        ymin, xmin, ymax, xmax = box
+        x = float(xmin) * img_w
+        y = float(ymin) * img_h
+        w = (float(xmax) - float(xmin)) * img_w
+        h = (float(ymax) - float(ymin)) * img_h
+        boxes.append({"label": label, "x": x, "y": y, "width": w, "height": h, "score": score})
+    return boxes
 
 
 def _remote_detect(image_path: str, endpoint: str, threshold: float) -> List[Dict[str, Any]]:
