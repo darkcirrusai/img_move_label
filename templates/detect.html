@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Object Detection Labeler</title>
+    <link rel="stylesheet" href="/static/detect.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <strong>img_move_label</strong>
+            <nav>
+                <a href="/">Classifier</a>
+                <a href="/detect" class="active">Object Detection</a>
+            </nav>
+        </div>
+        <div class="stats">
+            <span id="progress">{{annotated}} / {{total}} annotated</span>
+        </div>
+    </header>
+
+    <main class="layout">
+        <aside class="sidebar">
+            <h3>Images</h3>
+            <input type="text" id="image-filter" placeholder="Filter by name…">
+            <ul id="image-list"></ul>
+        </aside>
+
+        <section class="workspace">
+            <div class="toolbar">
+                <button id="prev-btn" title="Previous (Left Arrow)">◀ Prev</button>
+                <span id="current-image">—</span>
+                <button id="next-btn" title="Next (Right Arrow)">Next ▶</button>
+
+                <span class="divider"></span>
+
+                <label>Label:
+                    <input list="label-suggestions" id="active-label" value="object">
+                    <datalist id="label-suggestions"></datalist>
+                </label>
+                <span class="legend" id="color-swatch"></span>
+
+                <span class="divider"></span>
+
+                <button id="auto-annotate-btn" title="Ask the configured model for boxes">
+                    ✨ Auto-annotate
+                </button>
+                <label title="Score cutoff for auto-annotation">
+                    Threshold
+                    <input type="number" id="auto-threshold" min="0" max="1" step="0.05" value="0.5">
+                </label>
+
+                <span class="divider"></span>
+
+                <button id="save-btn" class="primary">💾 Save</button>
+                <button id="clear-btn" class="danger">Clear all</button>
+            </div>
+
+            <div class="canvas-host" id="canvas-host">
+                <img id="source-image" alt="">
+                <canvas id="draw-canvas"></canvas>
+                <div class="hint" id="canvas-hint">
+                    Click-and-drag to draw a box. Click an existing box to select
+                    it; press <kbd>Delete</kbd> to remove, double-click to rename.
+                </div>
+            </div>
+
+            <div class="boxes-panel">
+                <h4>Boxes <span id="box-count">(0)</span></h4>
+                <ul id="box-list"></ul>
+            </div>
+        </section>
+
+        <aside class="rightbar">
+            <section>
+                <h3>Auto-annotate source</h3>
+                <label>Model endpoint (optional)</label>
+                <input type="text" id="endpoint" placeholder="https://…/predict">
+                <p class="hint-text">
+                    Leave blank to use a locally installed torchvision Faster R-CNN
+                    (falls back only if torchvision is available).
+                </p>
+            </section>
+
+            <section>
+                <h3>Export dataset</h3>
+                <button data-export="coco">COCO JSON</button>
+                <button data-export="voc">Pascal VOC (zip)</button>
+                <button data-export="yolo">YOLO txt (zip)</button>
+            </section>
+
+            <section>
+                <h3>Vertex AI dataset</h3>
+                <label>GCS bucket</label>
+                <input type="text" id="gcp-bucket" placeholder="my-vertex-bucket">
+                <label>Prefix (folder inside bucket)</label>
+                <input type="text" id="gcp-prefix" placeholder="object-detection/v1">
+                <label class="checkbox">
+                    <input type="checkbox" id="gcp-split" checked>
+                    Split into TRAIN / VALIDATION / TEST
+                </label>
+                <div class="split-fractions">
+                    <label>Train
+                        <input type="number" id="gcp-train" min="0" max="1" step="0.05" value="0.8">
+                    </label>
+                    <label>Val
+                        <input type="number" id="gcp-val" min="0" max="1" step="0.05" value="0.1">
+                    </label>
+                </div>
+                <button id="gcp-export-btn" class="primary">Generate Vertex CSV</button>
+                <pre id="gcp-result" class="result"></pre>
+            </section>
+        </aside>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script src="/static/detect.js"></script>
+</body>
+</html>
