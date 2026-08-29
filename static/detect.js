@@ -81,8 +81,8 @@ function renderImageList() {
     state.images
         .filter((img) => !filter || img.name.toLowerCase().includes(filter))
         .filter((img) => {
-            if (annotatedFilter === "labelled") return img.annotated;
-            if (annotatedFilter === "unlabelled") return !img.annotated;
+            if (annotatedFilter === "annotated") return img.annotated;
+            if (annotatedFilter === "not-annotated") return !img.annotated;
             return true;
         })
         .forEach((img) => {
@@ -108,7 +108,26 @@ function renderImageList() {
 
 function updateProgress() {
     const annotated = state.images.filter((i) => i.annotated).length;
-    el("progress").textContent = `${annotated} / ${state.images.length} annotated`;
+    const total = state.images.length;
+    el("progress").textContent = `${annotated} / ${total} annotated`;
+    const counter = el("annotated-counter");
+    if (counter) {
+        counter.textContent = `${annotated} annotated · ${total - annotated} remaining`;
+    }
+    // Keep live counts on the filter options.
+    const sel = el("annotated-filter");
+    if (sel) {
+        const counts = {
+            "all": total,
+            "annotated": annotated,
+            "not-annotated": total - annotated,
+        };
+        Array.from(sel.options).forEach((opt) => {
+            if (opt.value in counts) {
+                opt.textContent = `${opt.dataset.label} (${counts[opt.value]})`;
+            }
+        });
+    }
 }
 
 async function selectImage(img) {
@@ -426,9 +445,32 @@ canvas().addEventListener("dblclick", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (e.key === "Escape" && cropMode) {
         setCropMode(false);
+        return;
+    }
+    if (e.key === "c" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // c toggles crop mode.
+        setCropMode(!cropMode);
+        e.preventDefault();
+        return;
+    }
+    if (e.key === "Enter" && cropMode) {
+        // Enter finishes cropping: applies the selected region.
+        if (state.cropRect) {
+            applyEdit({ crop: state.cropRect });
+        } else {
+            toast("Drag a region to crop first", true);
+        }
+        e.preventDefault();
+        return;
+    }
+    if (e.key === "a" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // a triggers auto-annotation.
+        el("auto-annotate-btn").click();
+        e.preventDefault();
         return;
     }
     if ((e.key === "Delete" || e.key === "Backspace") && state.selected !== -1) {
