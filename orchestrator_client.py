@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from PIL import Image, ImageOps
 
-DEFAULT_ORCHESTRATOR_URL = "http://localhost:8010"
+DEFAULT_ORCHESTRATOR_URL = "http://localhost:9000"
 REQUEST_TIMEOUT = 60
 CONFIG_PATH = "detect_config.json"
 
