@@ -25,11 +25,12 @@
         <aside class="sidebar">
             <h3>Images</h3>
             <input type="text" id="image-filter" placeholder="Filter by name…">
-            <select id="annotated-filter">
-                <option value="all">All</option>
-                <option value="labelled">Labelled</option>
-                <option value="unlabelled">Unlabelled</option>
+            <select id="annotated-filter" title="Filter images by annotation status">
+                <option value="all" data-label="All">All</option>
+                <option value="annotated" data-label="Annotated">Annotated</option>
+                <option value="not-annotated" data-label="Not annotated">Not annotated</option>
             </select>
+            <p id="annotated-counter" class="hint-text"></p>
             <ul id="image-list"></ul>
         </aside>
 
@@ -56,7 +57,7 @@
                         <option value="blade_crop">Blade crop</option>
                     </select>
                 </label>
-                <button id="auto-annotate-btn" title="Ask the orchestrator for boxes">
+                <button id="auto-annotate-btn" title="Ask the orchestrator for boxes (A)">
                     ✨ Auto-annotate
                 </button>
                 <label title="Detections at or above this score become boxes">
@@ -72,8 +73,8 @@
 
                 <button id="rotate-ccw-btn" title="Rotate image 90° counter-clockwise (saves an edited copy)">⟲ 90°</button>
                 <button id="rotate-cw-btn" title="Rotate image 90° clockwise (saves an edited copy)">⟳ 90°</button>
-                <button id="crop-btn" title="Drag a region on the image, then apply (saves an edited copy)">✂ Crop</button>
-                <button id="crop-apply-btn" class="primary" hidden>Apply crop</button>
+                <button id="crop-btn" title="Drag a region on the image, then apply (saves an edited copy) (C)">✂ Crop</button>
+                <button id="crop-apply-btn" class="primary" title="Apply the selected crop (Enter)" hidden>Apply crop</button>
                 <button id="crop-cancel-btn" hidden>Cancel</button>
 
                 <span class="divider"></span>
@@ -92,6 +93,9 @@
                     it; press <kbd>Delete</kbd> to remove, double-click to rename.
                     Changes are auto-saved when you switch images. ✂ Crop /
                     ⟲⟳ Rotate save an edited copy alongside the original.
+                    Shortcuts: <kbd>C</kbd> crop mode, <kbd>Enter</kbd> apply
+                    crop, <kbd>Esc</kbd> cancel crop, <kbd>A</kbd>
+                    auto-annotate, <kbd>←</kbd>/<kbd>→</kbd> prev/next image.
                 </div>
             </div>
 

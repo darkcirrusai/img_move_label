@@ -55,12 +55,17 @@ html, body {
     color: #374151;
 }
 
-#image-filter {
+#image-filter, #annotated-filter {
     width: 100%;
     padding: 6px 8px;
     margin-bottom: 8px;
     border: 1px solid #d1d5db;
     border-radius: 4px;
+    background: #fff;
+}
+
+#annotated-counter {
+    margin: 0 0 8px;
 }
 
 #image-list {
