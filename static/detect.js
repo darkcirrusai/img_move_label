@@ -97,7 +97,10 @@ function renderImageList() {
             if (state.current && state.current.name === img.name) {
                 li.classList.add("active");
             }
-            li.addEventListener("click", () => selectImage(img));
+            li.addEventListener("click", async () => {
+                await autoSaveIfDirty();
+                selectImage(img);
+            });
             list.appendChild(li);
         });
     updateProgress();
@@ -114,6 +117,7 @@ async function selectImage(img) {
     state.candidates = [];
     state.selected = -1;
     state.dirty = false;
+    if (cropMode) setCropMode(false);
     el("current-image").textContent = img.name;
 
     // Load annotation
@@ -235,6 +239,22 @@ function drawBoxes() {
         }
     });
 
+    // Crop overlay: dim everything outside the selected region.
+    if (cropMode && state.cropRect) {
+        const x = toCanvas(state.cropRect.x), y = toCanvas(state.cropRect.y);
+        const w = toCanvas(state.cropRect.width), h = toCanvas(state.cropRect.height);
+        g.fillStyle = "rgba(15, 23, 42, 0.55)";
+        g.fillRect(0, 0, c.width, y);
+        g.fillRect(0, y + h, c.width, c.height - y - h);
+        g.fillRect(0, y, x, h);
+        g.fillRect(x + w, y, c.width - x - w, h);
+        g.strokeStyle = "#fff";
+        g.setLineDash([6, 4]);
+        g.lineWidth = 2;
+        g.strokeRect(x, y, w, h);
+        g.setLineDash([]);
+    }
+
     updateColorSwatch();
 }
 
@@ -246,6 +266,11 @@ function updateColorSwatch() {
 let dragging = false;
 let dragStart = null;
 let dragBox = null;  // the in-progress box in image coordinates
+
+// Crop state (crop mode repurposes the drag gesture to pick a region)
+let cropMode = false;
+let cropDragging = false;
+let cropStart = null;
 
 function canvasPoint(evt) {
     const rect = canvas().getBoundingClientRect();
@@ -296,6 +321,13 @@ function toggleReject(idx) {
 
 canvas().addEventListener("mousedown", (e) => {
     const pt = canvasPoint(e);
+    if (cropMode) {
+        cropDragging = true;
+        cropStart = pt;
+        state.cropRect = null;
+        drawBoxes();
+        return;
+    }
     const hit = hitTest(pt);
     if (hit !== -1) {
         const box = state.boxes[hit];
@@ -321,6 +353,19 @@ canvas().addEventListener("mousedown", (e) => {
 });
 
 canvas().addEventListener("mousemove", (e) => {
+    if (cropDragging) {
+        const pt = canvasPoint(e);
+        const x1 = Math.min(cropStart.x, pt.x), y1 = Math.min(cropStart.y, pt.y);
+        const x2 = Math.max(cropStart.x, pt.x), y2 = Math.max(cropStart.y, pt.y);
+        state.cropRect = {
+            x: toImage(x1),
+            y: toImage(y1),
+            width: toImage(x2 - x1),
+            height: toImage(y2 - y1),
+        };
+        drawBoxes();
+        return;
+    }
     if (!dragging) return;
     const pt = canvasPoint(e);
     const x1 = Math.min(dragStart.x, pt.x);
@@ -344,6 +389,15 @@ canvas().addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", (e) => {
+    if (cropDragging) {
+        cropDragging = false;
+        if (!state.cropRect || state.cropRect.width < 8 || state.cropRect.height < 8) {
+            state.cropRect = null;
+        }
+        updateCropButtons();
+        drawBoxes();
+        return;
+    }
     if (!dragging) return;
     dragging = false;
     if (dragBox && dragBox.width > 3 && dragBox.height > 3) {
@@ -358,6 +412,7 @@ window.addEventListener("mouseup", (e) => {
 });
 
 canvas().addEventListener("dblclick", (e) => {
+    if (cropMode) return;
     const pt = canvasPoint(e);
     const hit = hitTest(pt);
     if (hit === -1) return;
@@ -372,6 +427,10 @@ canvas().addEventListener("dblclick", (e) => {
 
 window.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    if (e.key === "Escape" && cropMode) {
+        setCropMode(false);
+        return;
+    }
     if ((e.key === "Delete" || e.key === "Backspace") && state.selected !== -1) {
         state.boxes.splice(state.selected, 1);
         state.selected = -1;
@@ -535,7 +594,7 @@ el("active-label").addEventListener("input", updateColorSwatch);
 // ---------------------------------------------------------------------------
 // Save / clear / navigation
 // ---------------------------------------------------------------------------
-async function saveAnnotation() {
+async function saveAnnotation(silent = false) {
     if (!state.current) return;
     // Rejected detections are dropped; unaccepted candidates are stored
     // separately so they persist but never reach an export.
@@ -560,9 +619,13 @@ async function saveAnnotation() {
     const data = await res.json();
     state.dirty = false;
     state.current.annotated = true;
-    toast(`Saved ${data.saved} boxes`);
+    if (!silent) toast(`Saved ${data.saved} boxes`);
     renderImageList();
     refreshLabelSuggestions();
+}
+
+async function autoSaveIfDirty() {
+    if (state.dirty && state.current) await saveAnnotation(true);
 }
 
 function clearAll() {
@@ -575,9 +638,11 @@ function clearAll() {
     renderBoxList();
 }
 
-function nextImage(delta) {
+async function nextImage(delta) {
     if (!state.current) return;
-    const idx = state.images.findIndex((i) => i.name === state.current.name);
+    const name = state.current.name;
+    await autoSaveIfDirty();
+    const idx = state.images.findIndex((i) => i.name === name);
     const nextIdx = (idx + delta + state.images.length) % state.images.length;
     selectImage(state.images[nextIdx]);
 }
@@ -630,6 +695,57 @@ el("auto-annotate-btn").addEventListener("click", async () => {
         btn.textContent = prev;
         btn.disabled = false;
     }
+});
+
+// ---------------------------------------------------------------------------
+// Image editing (crop / rotate)
+//
+// Edits are applied server-side and saved as an edited copy in the same
+// folder; the original stays on disk but leaves the image list unless it has
+// saved boxes. Saved boxes/candidates are remapped onto the edited image.
+// ---------------------------------------------------------------------------
+function setCropMode(on) {
+    cropMode = on;
+    cropDragging = false;
+    state.cropRect = null;
+    el("crop-btn").classList.toggle("primary", on);
+    updateCropButtons();
+    drawBoxes();
+}
+
+function updateCropButtons() {
+    el("crop-apply-btn").hidden = !(cropMode && state.cropRect);
+    el("crop-cancel-btn").hidden = !cropMode;
+}
+
+async function applyEdit(edit) {
+    if (!state.current) return;
+    await autoSaveIfDirty();
+    const res = await fetch("/api/detect/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: state.current.name, ...edit }),
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.detail || "Edit failed", true);
+        return;
+    }
+    const data = await res.json();
+    setCropMode(false);
+    await loadImages();
+    const img = state.images.find((i) => i.name === data.image);
+    if (img) await selectImage(img);
+    toast(`Saved edited image ${data.image}`);
+}
+
+el("rotate-cw-btn").addEventListener("click", () => applyEdit({ rotate: 90 }));
+el("rotate-ccw-btn").addEventListener("click", () => applyEdit({ rotate: -90 }));
+el("crop-btn").addEventListener("click", () => setCropMode(!cropMode));
+el("crop-cancel-btn").addEventListener("click", () => setCropMode(false));
+el("crop-apply-btn").addEventListener("click", () => {
+    if (!state.cropRect) return;
+    applyEdit({ crop: state.cropRect });
 });
 
 // ---------------------------------------------------------------------------

@@ -26,11 +26,13 @@ fallbacks for other common export key names).
 """
 
 import base64
+import io
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from PIL import Image, ImageOps
 
 DEFAULT_ORCHESTRATOR_URL = "http://localhost:8010"
 REQUEST_TIMEOUT = 60
@@ -106,8 +108,28 @@ def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def encode_image(image_path: str) -> str:
+    """Base64-encode an image for inference, normalizing EXIF orientation.
+
+    Cameras often store rotated pixels plus an EXIF orientation tag. Browsers
+    render the *oriented* image, but TFServing models decode the raw pixels —
+    so an image with a non-default orientation must be transposed before
+    inference or the returned boxes land in the wrong place on screen.
+    """
     with open(image_path, "rb") as fh:
-        return base64.b64encode(fh.read()).decode("utf-8")
+        raw = fh.read()
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            orientation = img.getexif().get(0x0112, 1)
+            if orientation and int(orientation) != 1:
+                oriented = ImageOps.exif_transpose(img)
+                if oriented.mode != "RGB":
+                    oriented = oriented.convert("RGB")
+                buf = io.BytesIO()
+                oriented.save(buf, format="JPEG", quality=95)
+                return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception:
+        pass  # unreadable metadata: fall through and send the bytes as stored
+    return base64.b64encode(raw).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------

@@ -94,6 +94,27 @@ Detections are split by confidence:
 Hand-drawn boxes work exactly as before: click-and-drag to draw, click to
 select, <kbd>Delete</kbd> to remove, double-click to rename.
 
+Unsaved changes are **auto-saved when you navigate** to another image
+(sidebar click, Prev/Next, arrow keys) — you can always come back and fix an
+image later.
+
+### Image orientation
+
+EXIF orientation is respected end to end: the app reports the *displayed*
+dimensions, and images carrying a non-default orientation tag are transposed
+before being sent for inference, so detection boxes line up with what the
+browser shows.
+
+### Crop & rotate
+
+The toolbar's **⟲ 90° / ⟳ 90°** buttons rotate the image; **✂ Crop** lets
+you drag a region and apply it (<kbd>Esc</kbd> cancels). Edits are saved as a
+copy in the same folder (`<base>_edited.jpg`; editing an already-edited image
+overwrites it in place), with EXIF orientation baked in. Saved boxes and
+candidates are remapped onto the edited image (boxes falling outside a crop
+are dropped). The original file stays on disk, but is excluded from the image
+lists unless it has saved boxes of its own.
+
 ### Exports
 
 In the right-hand panel:

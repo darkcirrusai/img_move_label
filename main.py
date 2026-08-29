@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import re
 import shutil
 import time
 from dotenv import load_dotenv, find_dotenv
@@ -18,7 +19,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 import orchestrator_client
@@ -47,7 +48,7 @@ templates = Jinja2Templates(directory="templates/")
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    img_list = _list_images(image_folder)
+    img_list = _list_active_images(image_folder)
     pic_rem = len(img_list)
     try:
         next_img = img_list[0]
@@ -73,11 +74,11 @@ def move(item_id: str, request: Request):
     negative_cat = len(os.listdir(os.path.join(UPLOAD_FOLDER, '1'))) if os.path.isdir(
         os.path.join(UPLOAD_FOLDER, '1')) else 0
 
-    pic_rem = len(_list_images(image_folder))
+    pic_rem = len(_list_active_images(image_folder))
 
     shutil.move(image_path, upload_path)
 
-    img_list = _list_images(image_folder)
+    img_list = _list_active_images(image_folder)
     next_img = img_list[0] if img_list else 'no images found in the folder'
     return templates.TemplateResponse(request, "welcome.html",
                                       {"image": next_img, "pic_rem": pic_rem,
@@ -147,6 +148,44 @@ def _list_images(folder: str) -> List[str]:
     )
 
 
+# Edited copies of an image are named <base>_edited.<ext> (then _edited_1,
+# _edited_2, … if taken). Editing an already-edited file overwrites it.
+_EDITED_RE = re.compile(r"_edited(_\d+)?$")
+
+
+def _is_edited_name(name: str) -> bool:
+    return bool(_EDITED_RE.search(os.path.splitext(name)[0]))
+
+
+def _edited_target_name(folder: str, name: str) -> str:
+    base, ext = os.path.splitext(name)
+    if _EDITED_RE.search(base):
+        return name
+    candidate = f"{base}_edited{ext}"
+    counter = 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{base}_edited_{counter}{ext}"
+        counter += 1
+    return candidate
+
+
+def _list_active_images(folder: str) -> List[str]:
+    """Images to work on: hide an original that has an edited copy unless the
+    original itself carries saved boxes."""
+    images = _list_images(folder)
+    bases = {os.path.splitext(n)[0] for n in images}
+    active = []
+    for name in images:
+        base = os.path.splitext(name)[0]
+        if not _is_edited_name(name):
+            pattern = re.compile(re.escape(base) + r"_edited(_\d+)?$")
+            superseded = any(pattern.fullmatch(b) for b in bases)
+            if superseded and not _read_annotation(name).get("boxes"):
+                continue
+        active.append(name)
+    return active
+
+
 def _annotation_path(image_name: str) -> str:
     base = os.path.splitext(image_name)[0]
     return os.path.join(ANNOTATIONS_DIR, f"{base}.json")
@@ -161,14 +200,15 @@ def _read_annotation(image_name: str) -> Dict[str, Any]:
 
 
 def _image_dimensions(image_name: str) -> tuple[int, int]:
+    """Displayed (EXIF-oriented) dimensions, matching what the browser shows."""
     path = os.path.join(image_folder, image_name)
     with Image.open(path) as img:
-        return img.size  # (width, height)
+        return ImageOps.exif_transpose(img).size  # (width, height)
 
 
 @app.get("/detect", response_class=HTMLResponse)
 async def detect_page(request: Request):
-    images = _list_images(image_folder)
+    images = _list_active_images(image_folder)
     annotated = sum(
         1 for name in images if os.path.exists(_annotation_path(name))
     )
@@ -185,7 +225,7 @@ async def detect_page(request: Request):
 
 @app.get("/api/detect/images")
 def api_list_images():
-    images = _list_images(image_folder)
+    images = _list_active_images(image_folder)
     return {
         "images": [
             {
@@ -311,6 +351,122 @@ def api_auto_annotate(payload: AutoAnnotateRequest):
 
 
 # ---------------------------------------------------------------------------
+# Image editing (rotate / crop)
+# ---------------------------------------------------------------------------
+class CropRect(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class ImageEditRequest(BaseModel):
+    image: str
+    rotate: int = 0  # clockwise degrees: -90, 0, 90, 180, 270
+    crop: Optional[CropRect] = None
+
+
+def _rotate_box(b: Dict[str, Any], rotate: int, w: float, h: float) -> Dict[str, Any]:
+    """Map a box through a clockwise rotation of the (w, h) image."""
+    x, y, bw, bh = b["x"], b["y"], b["width"], b["height"]
+    if rotate == 90:
+        return {**b, "x": h - y - bh, "y": x, "width": bh, "height": bw}
+    if rotate == 180:
+        return {**b, "x": w - x - bw, "y": h - y - bh}
+    if rotate == 270:
+        return {**b, "x": y, "y": w - x - bw, "width": bh, "height": bw}
+    return b
+
+
+def _crop_box(b: Dict[str, Any], cx: float, cy: float,
+              cw: float, ch: float) -> Optional[Dict[str, Any]]:
+    """Shift a box into the crop's coordinate space, clipping to its bounds;
+    boxes left smaller than 2px are dropped."""
+    x1 = max(b["x"] - cx, 0.0)
+    y1 = max(b["y"] - cy, 0.0)
+    x2 = min(b["x"] + b["width"] - cx, cw)
+    y2 = min(b["y"] + b["height"] - cy, ch)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    return {**b, "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+
+
+@app.post("/api/detect/edit")
+def api_edit_image(payload: ImageEditRequest):
+    """
+    Rotate and/or crop an image, saving the result as an edited copy in the
+    same folder (<base>_edited.<ext>; an already-edited image is overwritten
+    in place). Saved boxes and candidates are mapped into the edited image's
+    coordinates. The original is kept, but disappears from the image lists
+    unless it carries saved boxes of its own.
+
+    Rotation is applied first, so crop coordinates are in the rotated image's
+    pixel space (which is what the UI shows when both are combined).
+    """
+    image_path = os.path.join(image_folder, payload.image)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="image not found")
+    rotate = payload.rotate % 360
+    if rotate not in (0, 90, 180, 270):
+        raise HTTPException(status_code=400, detail="rotate must be a multiple of 90")
+    if rotate == 0 and payload.crop is None:
+        raise HTTPException(status_code=400, detail="nothing to do: no rotation or crop given")
+
+    annotation = _read_annotation(payload.image)
+    boxes = list(annotation.get("boxes") or [])
+    candidates = list(annotation.get("candidates") or [])
+
+    with Image.open(image_path) as img:
+        im = ImageOps.exif_transpose(img)
+        w, h = im.size
+
+        if rotate:
+            transpose = {90: Image.Transpose.ROTATE_270,
+                         180: Image.Transpose.ROTATE_180,
+                         270: Image.Transpose.ROTATE_90}[rotate]
+            im = im.transpose(transpose)
+            boxes = [_rotate_box(b, rotate, w, h) for b in boxes]
+            candidates = [_rotate_box(b, rotate, w, h) for b in candidates]
+            w, h = im.size
+
+        if payload.crop is not None:
+            cx = max(0, int(round(payload.crop.x)))
+            cy = max(0, int(round(payload.crop.y)))
+            cx2 = min(w, int(round(payload.crop.x + payload.crop.width)))
+            cy2 = min(h, int(round(payload.crop.y + payload.crop.height)))
+            if cx2 - cx < 8 or cy2 - cy < 8:
+                raise HTTPException(status_code=400, detail="crop region is too small")
+            im = im.crop((cx, cy, cx2, cy2))
+            cw, ch = float(cx2 - cx), float(cy2 - cy)
+            boxes = [t for b in boxes if (t := _crop_box(b, cx, cy, cw, ch))]
+            candidates = [t for b in candidates if (t := _crop_box(b, cx, cy, cw, ch))]
+            w, h = im.size
+
+        target = _edited_target_name(image_folder, payload.image)
+        target_path = os.path.join(image_folder, target)
+        if os.path.splitext(target)[1].lower() in {".jpg", ".jpeg"} and im.mode != "RGB":
+            im = im.convert("RGB")
+        im.save(target_path)
+
+    target_ann = _annotation_path(target)
+    if boxes or candidates:
+        with open(target_ann, "w", encoding="utf-8") as fh:
+            json.dump({
+                "image": target,
+                "boxes": boxes,
+                "candidates": candidates,
+                "image_width": w,
+                "image_height": h,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, fh, indent=2)
+    elif os.path.exists(target_ann):
+        os.remove(target_ann)
+
+    return {"ok": True, "image": target,
+            "boxes": len(boxes), "candidates": len(candidates)}
+
+
+# ---------------------------------------------------------------------------
 # Classification modules (cutter_wear, wear_type) via the orchestrator
 # ---------------------------------------------------------------------------
 class ClassifyPredictRequest(BaseModel):
@@ -356,7 +512,7 @@ def api_classify_state(module: str):
             label_dir = os.path.join(module_dir, label)
             if os.path.isdir(label_dir):
                 counts[label] = len(_list_images(label_dir))
-    images = _list_images(image_folder)
+    images = _list_active_images(image_folder)
     return {
         "module": module,
         "images": [{"name": name, "url": f"/source_files/{quote(name)}"}
@@ -404,7 +560,7 @@ def api_classify_assign(payload: ClassifyAssignRequest):
 def _collect_annotations() -> List[Dict[str, Any]]:
     """Return a list of {image, path, width, height, boxes} for all annotated images."""
     results = []
-    for name in _list_images(image_folder):
+    for name in _list_active_images(image_folder):
         ann_path = _annotation_path(name)
         if not os.path.exists(ann_path):
             continue
