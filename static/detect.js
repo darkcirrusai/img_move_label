@@ -1,11 +1,19 @@
 // Object detection labeling UI.
 //
 // State model
-//   state.images   : [{name, url, annotated}]
-//   state.current  : image object we're labeling
-//   state.boxes    : [{label, x, y, width, height, score?}] in image pixel space
-//   state.selected : index of selected box or -1
-//   state.imgW/H   : natural dimensions of the current image
+//   state.images     : [{name, url, annotated}]
+//   state.current    : image object we're labeling
+//   state.boxes      : [{label, x, y, width, height, score?, rejected?}]
+//                      in image pixel space. A box with a score is a model
+//                      detection: clicking it toggles rejected (rejected
+//                      boxes are not saved). Boxes without a score are
+//                      hand-drawn: clicking selects them.
+//   state.candidates : [{label, x, y, width, height, score}] low-confidence
+//                      model detections (candidate band, default 20-50%).
+//                      Clicking one accepts it into state.boxes; unaccepted
+//                      candidates are ignored by every export.
+//   state.selected   : index of selected box or -1
+//   state.imgW/H     : natural dimensions of the current image
 //
 // The canvas is drawn on top of the image; we maintain an image -> canvas
 // scale factor so that boxes are stored in image pixel coordinates (which is
@@ -17,6 +25,7 @@ const state = {
     images: [],
     current: null,
     boxes: [],
+    candidates: [],
     selected: -1,
     imgW: 0,
     imgH: 0,
@@ -105,6 +114,7 @@ function updateProgress() {
 async function selectImage(img) {
     state.current = img;
     state.boxes = [];
+    state.candidates = [];
     state.selected = -1;
     state.dirty = false;
     el("current-image").textContent = img.name;
@@ -113,6 +123,7 @@ async function selectImage(img) {
     const res = await fetch(`/api/detect/annotation/${encodeURIComponent(img.name)}`);
     const data = await res.json();
     state.boxes = (data.boxes || []).map((b) => ({ ...b }));
+    state.candidates = (data.candidates || []).map((b) => ({ ...b }));
     state.imgW = data.image_width || 0;
     state.imgH = data.image_height || 0;
 
@@ -172,18 +183,44 @@ function drawBoxes() {
     const c = canvas();
     const g = ctx();
     g.clearRect(0, 0, c.width, c.height);
-    state.boxes.forEach((box, idx) => {
-        const selected = idx === state.selected;
-        const color = colorFor(box.label);
-        g.lineWidth = selected ? 3 : 2;
-        g.strokeStyle = color;
-        g.fillStyle = color + "22";
+
+    // Candidates first, dashed, so accepted boxes draw on top of them.
+    state.candidates.forEach((box) => {
         const x = toCanvas(box.x), y = toCanvas(box.y);
         const w = toCanvas(box.width), h = toCanvas(box.height);
+        g.lineWidth = 2;
+        g.setLineDash([6, 4]);
+        g.strokeStyle = "#f59e0b";
+        g.fillStyle = "#f59e0b18";
         g.fillRect(x, y, w, h);
         g.strokeRect(x, y, w, h);
+        g.setLineDash([]);
 
-        const label = box.label + (box.score != null ? ` ${(box.score * 100).toFixed(0)}%` : "");
+        const label = `? ${box.label} ${(box.score * 100).toFixed(0)}%`;
+        g.font = "12px sans-serif";
+        const metrics = g.measureText(label);
+        g.fillStyle = "#f59e0b";
+        g.fillRect(x, y - 16, metrics.width + 8, 16);
+        g.fillStyle = "#fff";
+        g.fillText(label, x + 4, y - 4);
+    });
+
+    state.boxes.forEach((box, idx) => {
+        const selected = idx === state.selected;
+        const rejected = !!box.rejected;
+        const color = rejected ? "#9ca3af" : colorFor(box.label);
+        g.lineWidth = selected ? 3 : 2;
+        g.strokeStyle = color;
+        g.fillStyle = rejected ? "#9ca3af10" : color + "22";
+        const x = toCanvas(box.x), y = toCanvas(box.y);
+        const w = toCanvas(box.width), h = toCanvas(box.height);
+        if (rejected) g.setLineDash([3, 3]);
+        g.fillRect(x, y, w, h);
+        g.strokeRect(x, y, w, h);
+        g.setLineDash([]);
+
+        const label = (rejected ? "✕ " : "") + box.label +
+            (box.score != null ? ` ${(box.score * 100).toFixed(0)}%` : "");
         g.font = "12px sans-serif";
         const metrics = g.measureText(label);
         const labelH = 16;
@@ -191,6 +228,14 @@ function drawBoxes() {
         g.fillRect(x, y - labelH, metrics.width + 8, labelH);
         g.fillStyle = "#fff";
         g.fillText(label, x + 4, y - 4);
+        if (rejected) {
+            g.strokeStyle = color;
+            g.lineWidth = 1.5;
+            g.beginPath();
+            g.moveTo(x, y); g.lineTo(x + w, y + h);
+            g.moveTo(x + w, y); g.lineTo(x, y + h);
+            g.stroke();
+        }
     });
 
     updateColorSwatch();
@@ -223,13 +268,53 @@ function hitTest(pt) {
     return -1;
 }
 
+function hitTestCandidates(pt) {
+    for (let i = state.candidates.length - 1; i >= 0; i--) {
+        const b = state.candidates[i];
+        const x = toCanvas(b.x), y = toCanvas(b.y);
+        const w = toCanvas(b.width), h = toCanvas(b.height);
+        if (pt.x >= x && pt.x <= x + w && pt.y >= y && pt.y <= y + h) return i;
+    }
+    return -1;
+}
+
+function acceptCandidate(idx) {
+    const cand = state.candidates.splice(idx, 1)[0];
+    state.boxes.push({ ...cand });
+    state.selected = state.boxes.length - 1;
+    state.dirty = true;
+    drawBoxes();
+    renderBoxList();
+    toast(`Accepted candidate "${cand.label}"`);
+}
+
+function toggleReject(idx) {
+    const box = state.boxes[idx];
+    box.rejected = !box.rejected;
+    state.selected = box.rejected ? -1 : idx;
+    state.dirty = true;
+    drawBoxes();
+    renderBoxList();
+}
+
 canvas().addEventListener("mousedown", (e) => {
     const pt = canvasPoint(e);
     const hit = hitTest(pt);
     if (hit !== -1) {
-        state.selected = hit;
-        drawBoxes();
-        renderBoxList();
+        const box = state.boxes[hit];
+        if (box.score != null) {
+            // Model detection: a click rejects it (clicking again restores).
+            toggleReject(hit);
+        } else {
+            state.selected = hit;
+            drawBoxes();
+            renderBoxList();
+        }
+        return;
+    }
+    const candHit = hitTestCandidates(pt);
+    if (candHit !== -1) {
+        acceptCandidate(candHit);
         return;
     }
     dragging = true;
@@ -313,19 +398,22 @@ window.addEventListener("keydown", (e) => {
 function renderBoxList() {
     const list = el("box-list");
     list.innerHTML = "";
-    el("box-count").textContent = `(${state.boxes.length})`;
+    const active = state.boxes.filter((b) => !b.rejected).length;
+    el("box-count").textContent = `(${active})`;
     state.boxes.forEach((box, idx) => {
         const li = document.createElement("li");
         if (idx === state.selected) li.classList.add("selected");
+        if (box.rejected) li.classList.add("rejected");
 
         const swatch = document.createElement("span");
         swatch.className = "swatch";
-        swatch.style.background = colorFor(box.label);
+        swatch.style.background = box.rejected ? "#9ca3af" : colorFor(box.label);
         li.appendChild(swatch);
 
         const input = document.createElement("input");
         input.type = "text";
         input.value = box.label;
+        input.disabled = !!box.rejected;
         input.addEventListener("change", () => {
             box.label = input.value.trim() || "object";
             state.dirty = true;
@@ -339,6 +427,15 @@ function renderBoxList() {
             score.style.fontSize = "11px";
             score.style.color = "#6b7280";
             li.appendChild(score);
+        }
+
+        if (box.score != null) {
+            const rejectBtn = document.createElement("button");
+            rejectBtn.className = "remove";
+            rejectBtn.textContent = box.rejected ? "↩" : "⊘";
+            rejectBtn.title = box.rejected ? "Restore detection" : "Reject detection (not saved)";
+            rejectBtn.addEventListener("click", () => toggleReject(idx));
+            li.appendChild(rejectBtn);
         }
 
         const remove = document.createElement("button");
@@ -355,10 +452,64 @@ function renderBoxList() {
         li.appendChild(remove);
 
         li.addEventListener("click", (e) => {
-            if (e.target === remove || e.target === input) return;
+            if (e.target.tagName === "BUTTON" || e.target === input) return;
             state.selected = idx;
             drawBoxes();
             renderBoxList();
+        });
+
+        list.appendChild(li);
+    });
+
+    renderCandidateList();
+}
+
+function renderCandidateList() {
+    const list = el("candidate-list");
+    list.innerHTML = "";
+    el("candidate-count").textContent = `(${state.candidates.length})`;
+    state.candidates.forEach((cand, idx) => {
+        const li = document.createElement("li");
+        li.classList.add("candidate");
+
+        const swatch = document.createElement("span");
+        swatch.className = "swatch";
+        swatch.style.background = "#f59e0b";
+        li.appendChild(swatch);
+
+        const name = document.createElement("span");
+        name.textContent = cand.label;
+        name.style.flex = "1";
+        li.appendChild(name);
+
+        const score = document.createElement("span");
+        score.textContent = `${(cand.score * 100).toFixed(0)}%`;
+        score.style.fontSize = "11px";
+        score.style.color = "#92400e";
+        li.appendChild(score);
+
+        const accept = document.createElement("button");
+        accept.className = "accept";
+        accept.textContent = "✓";
+        accept.title = "Accept into annotation set";
+        accept.addEventListener("click", () => acceptCandidate(idx));
+        li.appendChild(accept);
+
+        const dismiss = document.createElement("button");
+        dismiss.className = "remove";
+        dismiss.textContent = "✕";
+        dismiss.title = "Dismiss candidate";
+        dismiss.addEventListener("click", () => {
+            state.candidates.splice(idx, 1);
+            state.dirty = true;
+            drawBoxes();
+            renderBoxList();
+        });
+        li.appendChild(dismiss);
+
+        li.addEventListener("click", (e) => {
+            if (e.target.tagName === "BUTTON") return;
+            acceptCandidate(idx);
         });
 
         list.appendChild(li);
@@ -389,9 +540,14 @@ el("active-label").addEventListener("input", updateColorSwatch);
 // ---------------------------------------------------------------------------
 async function saveAnnotation() {
     if (!state.current) return;
+    // Rejected detections are dropped; unaccepted candidates are stored
+    // separately so they persist but never reach an export.
     const payload = {
         image: state.current.name,
-        boxes: state.boxes,
+        boxes: state.boxes
+            .filter((b) => !b.rejected)
+            .map(({ rejected, ...b }) => b),
+        candidates: state.candidates,
         image_width: state.imgW,
         image_height: state.imgH,
     };
@@ -413,9 +569,10 @@ async function saveAnnotation() {
 }
 
 function clearAll() {
-    if (!state.boxes.length) return;
-    if (!confirm("Remove all boxes on this image?")) return;
+    if (!state.boxes.length && !state.candidates.length) return;
+    if (!confirm("Remove all boxes and candidates on this image?")) return;
     state.boxes = [];
+    state.candidates = [];
     state.selected = -1;
     state.dirty = true;
     drawBoxes();
@@ -452,8 +609,9 @@ el("auto-annotate-btn").addEventListener("click", async () => {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 image: state.current.name,
-                endpoint: el("endpoint").value.trim() || null,
+                module: el("auto-module").value,
                 threshold: parseFloat(el("auto-threshold").value) || 0.5,
+                candidate_threshold: parseFloat(el("candidate-threshold").value) || 0.2,
             }),
         });
         if (!res.ok) {
@@ -462,12 +620,15 @@ el("auto-annotate-btn").addEventListener("click", async () => {
             return;
         }
         const data = await res.json();
-        // Merge suggested boxes with existing ones so the user can edit.
+        // Merge suggested boxes with existing ones so the user can edit;
+        // candidates from this run replace the previous candidate set.
         data.boxes.forEach((b) => state.boxes.push(b));
+        state.candidates = data.candidates || [];
         state.dirty = true;
         drawBoxes();
         renderBoxList();
-        toast(`Added ${data.boxes.length} suggested boxes`);
+        const msg = `Added ${data.boxes.length} boxes, ${state.candidates.length} candidates`;
+        toast(data.warning ? `${msg} — ${data.warning}` : msg, !!data.warning);
     } catch (exc) {
         toast("Auto-annotate failed: " + exc, true);
     } finally {
