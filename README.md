@@ -1,11 +1,22 @@
 # Image Labelling / Sorting App
 
-A lightweight FastAPI app that helps you build image datasets two ways:
+A lightweight FastAPI app that helps you build image datasets three ways:
 
 1. **Classification** – move images into labelled folders (the original flow).
-2. **Object Detection** – draw bounding boxes on images, optionally pre-filled
-   by an external model, then export to COCO / Pascal VOC / YOLO or to a Vertex
-   AI object-detection CSV.
+2. **Model-assisted classification** – the `cutter_wear` and `wear_type`
+   models suggest a label per image; the label you click decides which folder
+   the image is sorted into.
+3. **Object Detection** – draw bounding boxes on images, optionally pre-filled
+   by the `cutter_detect` or `blade_crop` models, then export to COCO /
+   Pascal VOC / YOLO or to a Vertex AI object-detection CSV.
+
+All model inference goes through the
+[dg-models-orchestrator](https://github.com/darkcirrusai/dg-models-orchestrator)
+— this app never talks to the TFServing containers directly. Configure it with
+the `ORCHESTRATOR_URL` and `ORCHESTRATOR_API_KEY` environment variables (or
+`orchestrator_url` / `orchestrator_api_key` in `detect_config.json`). The
+orchestrator returns raw TFServing predictions; parsing lives in
+`orchestrator_client.py`.
 
 ## Environment
 Python 3.8+, FastAPI 0.86.0
@@ -31,6 +42,21 @@ Place images into `source_files/`. Annotations are stored as JSON under
 Open <http://127.0.0.1:8000/>, enter a category in the right-hand form, and the
 image is moved into `sorted_files/<category>/`.
 
+## Model-assisted classification
+
+Open <http://127.0.0.1:8000/classify> and pick a module:
+
+| Module | Orchestrator endpoint | What it classifies |
+|--------|----------------------|--------------------|
+| `cutter_wear` | `/cutter-wear` | Wear level of a cutter |
+| `wear_type` | `/cutter-class` | Wear/cutter type |
+
+Each image is sent to the orchestrator (automatically, or via **✨ Predict**)
+and the per-class scores are shown as clickable buttons. Clicking a label —
+the suggested one, another class, or a custom label — moves the image into
+`sorted_files/<module>/<label>/` and advances to the next image. The model
+only suggests; nothing is saved until you click.
+
 ## Object Detection
 
 Open <http://127.0.0.1:8000/detect>.
@@ -44,28 +70,50 @@ Open <http://127.0.0.1:8000/detect>.
 
 ### Auto-annotation
 
-The `✨ Auto-annotate` button asks a model for boxes, which are merged with any
-you have already drawn so you can edit them before saving.
+The `✨ Auto-annotate` button asks the orchestrator for boxes. Pick the model
+in the toolbar:
 
-Two backends are supported:
+* **Cutter detection** (`/cutter-detect`) — combines both detection models,
+  labels boxes `cutter` / `lost` / `nozzle` / `ring_out`, and drops duplicate
+  detections (same label, IOU > 0.5, higher score wins). If one of the two
+  models fails, the other's detections are still used and a warning is shown.
+* **Blade crop** (`/blade-crop`) — returns `blade` boxes.
 
-1. **Remote model endpoint.** Enter the URL in the right-hand panel (or put it
-   in `detect_config.json` as `{ "auto_endpoint": "https://…/predict" }`). The
-   server will POST the image as a `multipart/form-data` `file` field and
-   expects JSON like:
+Detections are split by confidence:
 
-   ```json
-   {"boxes": [
-     {"label": "cat", "x": 10, "y": 12, "width": 80, "height": 120, "score": 0.91}
-   ]}
-   ```
+* **Boxes** (score ≥ *Threshold*, default 50%) are added to the annotation
+  set. **Click a model detection to reject it** — it turns grey with a cross
+  and is dropped on save; click it again (or use ↩ in the box list) to
+  restore it.
+* **Candidates** (*Cand. ≥* ≤ score < *Threshold*, default 20–50%) are drawn
+  as dashed amber boxes. **Click a candidate to accept it** into the
+  annotation set; unaccepted candidates are simply ignored — they are stored
+  alongside the annotation so they survive navigation, but never appear in
+  any export.
 
-   `xmin/ymin/xmax/ymax` coordinates are also accepted.
+Hand-drawn boxes work exactly as before: click-and-drag to draw, click to
+select, <kbd>Delete</kbd> to remove, double-click to rename.
 
-2. **Local torchvision Faster R-CNN.** If no endpoint is configured and
-   `torchvision` is installed, the bundled COCO-pretrained Faster R-CNN is
-   used. Install with `pip install torch torchvision` (kept optional because
-   it’s large).
+Unsaved changes are **auto-saved when you navigate** to another image
+(sidebar click, Prev/Next, arrow keys) — you can always come back and fix an
+image later.
+
+### Image orientation
+
+EXIF orientation is respected end to end: the app reports the *displayed*
+dimensions, and images carrying a non-default orientation tag are transposed
+before being sent for inference, so detection boxes line up with what the
+browser shows.
+
+### Crop & rotate
+
+The toolbar's **⟲ 90° / ⟳ 90°** buttons rotate the image; **✂ Crop** lets
+you drag a region and apply it (<kbd>Esc</kbd> cancels). Edits are saved as a
+copy in the same folder (`<base>_edited.jpg`; editing an already-edited image
+overwrites it in place), with EXIF orientation baked in. Saved boxes and
+candidates are remapped onto the edited image (boxes falling outside a crop
+are dropped). The original file stays on disk, but is excluded from the image
+lists unless it has saved boxes of its own.
 
 ### Exports
 
@@ -98,9 +146,10 @@ at its `gs://` URI.
 ```
 source_files/       # drop images here
 sorted_files/       # classifier moves images here by label
-annotations/        # per-image JSON: {image, boxes: [{label,x,y,width,height,score?}]}
+                    #   (model-assisted flow uses sorted_files/<module>/<label>/)
+annotations/        # per-image JSON: {image, boxes: [...], candidates: [...]}
 exports/            # generated export files (Vertex CSVs, etc.)
-detect_config.json  # optional: {"auto_endpoint": "..."} for auto-annotation
+detect_config.json  # optional: {"orchestrator_url": "...", "orchestrator_api_key": "..."}
 ```
 
 ## Future Developments

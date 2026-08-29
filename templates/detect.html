@@ -12,6 +12,7 @@
             <strong>img_move_label</strong>
             <nav>
                 <a href="/">Classifier</a>
+                <a href="/classify">Model Classify</a>
                 <a href="/detect" class="active">Object Detection</a>
             </nav>
         </div>
@@ -48,13 +49,32 @@
 
                 <span class="divider"></span>
 
-                <button id="auto-annotate-btn" title="Ask the configured model for boxes">
+                <label title="Detection model served by the orchestrator">
+                    Model
+                    <select id="auto-module">
+                        <option value="cutter_detect" selected>Cutter detection</option>
+                        <option value="blade_crop">Blade crop</option>
+                    </select>
+                </label>
+                <button id="auto-annotate-btn" title="Ask the orchestrator for boxes">
                     ✨ Auto-annotate
                 </button>
-                <label title="Score cutoff for auto-annotation">
+                <label title="Detections at or above this score become boxes">
                     Threshold
                     <input type="number" id="auto-threshold" min="0" max="1" step="0.05" value="0.5">
                 </label>
+                <label title="Detections between this score and the threshold become candidates you can accept by clicking">
+                    Cand. ≥
+                    <input type="number" id="candidate-threshold" min="0" max="1" step="0.05" value="0.2">
+                </label>
+
+                <span class="divider"></span>
+
+                <button id="rotate-ccw-btn" title="Rotate image 90° counter-clockwise (saves an edited copy)">⟲ 90°</button>
+                <button id="rotate-cw-btn" title="Rotate image 90° clockwise (saves an edited copy)">⟳ 90°</button>
+                <button id="crop-btn" title="Drag a region on the image, then apply (saves an edited copy)">✂ Crop</button>
+                <button id="crop-apply-btn" class="primary" hidden>Apply crop</button>
+                <button id="crop-cancel-btn" hidden>Cancel</button>
 
                 <span class="divider"></span>
 
@@ -66,25 +86,36 @@
                 <img id="source-image" alt="">
                 <canvas id="draw-canvas"></canvas>
                 <div class="hint" id="canvas-hint">
-                    Click-and-drag to draw a box. Click an existing box to select
+                    Click-and-drag to draw a box. Click a model detection to
+                    reject it (click again to restore); click a dashed
+                    candidate to accept it. Click a hand-drawn box to select
                     it; press <kbd>Delete</kbd> to remove, double-click to rename.
+                    Changes are auto-saved when you switch images. ✂ Crop /
+                    ⟲⟳ Rotate save an edited copy alongside the original.
                 </div>
             </div>
 
             <div class="boxes-panel">
                 <h4>Boxes <span id="box-count">(0)</span></h4>
                 <ul id="box-list"></ul>
+                <h4>Candidates <span id="candidate-count">(0)</span>
+                    <span class="hint-text" style="font-weight:normal;">— click to accept; unaccepted candidates are ignored</span>
+                </h4>
+                <ul id="candidate-list"></ul>
             </div>
         </section>
 
         <aside class="rightbar">
             <section>
                 <h3>Auto-annotate source</h3>
-                <label>Model endpoint (optional)</label>
-                <input type="text" id="endpoint" placeholder="https://…/predict">
                 <p class="hint-text">
-                    Leave blank to use a locally installed torchvision Faster R-CNN
-                    (falls back only if torchvision is available).
+                    Detections come from the dg-models-orchestrator
+                    (<code>ORCHESTRATOR_URL</code> / <code>ORCHESTRATOR_API_KEY</code>,
+                    or <code>orchestrator_url</code> / <code>orchestrator_api_key</code>
+                    in <code>detect_config.json</code>). Pick the model in the
+                    toolbar: <strong>Cutter detection</strong> labels cutter /
+                    lost / nozzle / ring_out from both detection models,
+                    <strong>Blade crop</strong> returns blade boxes.
                 </p>
             </section>
 

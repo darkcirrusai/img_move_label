@@ -1,10 +1,10 @@
 
 # 1. Library imports
-import base64
 import csv
 import io
 import json
 import os
+import re
 import shutil
 import time
 from dotenv import load_dotenv, find_dotenv
@@ -19,14 +19,15 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
+
+import orchestrator_client
 
 UPLOAD_FOLDER = 'sorted_files'
 image_folder = 'source_files'
 ANNOTATIONS_DIR = 'annotations'
 EXPORTS_DIR = 'exports'
-CONFIG_PATH = 'detect_config.json'
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
@@ -47,7 +48,7 @@ templates = Jinja2Templates(directory="templates/")
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    img_list = _list_images(image_folder)
+    img_list = _list_active_images(image_folder)
     pic_rem = len(img_list)
     try:
         next_img = img_list[0]
@@ -73,11 +74,11 @@ def move(item_id: str, request: Request):
     negative_cat = len(os.listdir(os.path.join(UPLOAD_FOLDER, '1'))) if os.path.isdir(
         os.path.join(UPLOAD_FOLDER, '1')) else 0
 
-    pic_rem = len(_list_images(image_folder))
+    pic_rem = len(_list_active_images(image_folder))
 
     shutil.move(image_path, upload_path)
 
-    img_list = _list_images(image_folder)
+    img_list = _list_active_images(image_folder)
     next_img = img_list[0] if img_list else 'no images found in the folder'
     return templates.TemplateResponse(request, "welcome.html",
                                       {"image": next_img, "pic_rem": pic_rem,
@@ -118,14 +119,16 @@ class Box(BaseModel):
 class AnnotationPayload(BaseModel):
     image: str
     boxes: List[Box]
+    candidates: List[Box] = []
     image_width: Optional[int] = None
     image_height: Optional[int] = None
 
 
 class AutoAnnotateRequest(BaseModel):
     image: str
-    endpoint: Optional[str] = None
+    module: str = "cutter_detect"
     threshold: float = 0.5
+    candidate_threshold: float = 0.2
 
 
 class GCPExportRequest(BaseModel):
@@ -145,6 +148,44 @@ def _list_images(folder: str) -> List[str]:
     )
 
 
+# Edited copies of an image are named <base>_edited.<ext> (then _edited_1,
+# _edited_2, … if taken). Editing an already-edited file overwrites it.
+_EDITED_RE = re.compile(r"_edited(_\d+)?$")
+
+
+def _is_edited_name(name: str) -> bool:
+    return bool(_EDITED_RE.search(os.path.splitext(name)[0]))
+
+
+def _edited_target_name(folder: str, name: str) -> str:
+    base, ext = os.path.splitext(name)
+    if _EDITED_RE.search(base):
+        return name
+    candidate = f"{base}_edited{ext}"
+    counter = 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        candidate = f"{base}_edited_{counter}{ext}"
+        counter += 1
+    return candidate
+
+
+def _list_active_images(folder: str) -> List[str]:
+    """Images to work on: hide an original that has an edited copy unless the
+    original itself carries saved boxes."""
+    images = _list_images(folder)
+    bases = {os.path.splitext(n)[0] for n in images}
+    active = []
+    for name in images:
+        base = os.path.splitext(name)[0]
+        if not _is_edited_name(name):
+            pattern = re.compile(re.escape(base) + r"_edited(_\d+)?$")
+            superseded = any(pattern.fullmatch(b) for b in bases)
+            if superseded and not _read_annotation(name).get("boxes"):
+                continue
+        active.append(name)
+    return active
+
+
 def _annotation_path(image_name: str) -> str:
     base = os.path.splitext(image_name)[0]
     return os.path.join(ANNOTATIONS_DIR, f"{base}.json")
@@ -159,14 +200,15 @@ def _read_annotation(image_name: str) -> Dict[str, Any]:
 
 
 def _image_dimensions(image_name: str) -> tuple[int, int]:
+    """Displayed (EXIF-oriented) dimensions, matching what the browser shows."""
     path = os.path.join(image_folder, image_name)
     with Image.open(path) as img:
-        return img.size  # (width, height)
+        return ImageOps.exif_transpose(img).size  # (width, height)
 
 
 @app.get("/detect", response_class=HTMLResponse)
 async def detect_page(request: Request):
-    images = _list_images(image_folder)
+    images = _list_active_images(image_folder)
     annotated = sum(
         1 for name in images if os.path.exists(_annotation_path(name))
     )
@@ -183,7 +225,7 @@ async def detect_page(request: Request):
 
 @app.get("/api/detect/images")
 def api_list_images():
-    images = _list_images(image_folder)
+    images = _list_active_images(image_folder)
     return {
         "images": [
             {
@@ -222,6 +264,9 @@ def api_save_annotation(payload: AnnotationPayload):
     data = {
         "image": payload.image,
         "boxes": [b.model_dump() for b in payload.boxes],
+        # Unaccepted model candidates (20-50% confidence by default) are kept
+        # so they survive navigation, but are excluded from every export.
+        "candidates": [b.model_dump() for b in payload.candidates],
         "image_width": payload.image_width,
         "image_height": payload.image_height,
         "updated_at": datetime.now(timezone.utc).isoformat() + "Z",
@@ -259,169 +304,254 @@ def api_list_labels():
 
 
 # ---------------------------------------------------------------------------
-# Auto-annotation via an external model endpoint
+# Auto-annotation via the model orchestrator
 # ---------------------------------------------------------------------------
 @app.post("/api/detect/auto")
 def api_auto_annotate(payload: AutoAnnotateRequest):
     """
-    Request boxes from a model. Two options are supported:
+    Request detections from the dg-models-orchestrator.
 
-    1. A user-provided HTTP endpoint that accepts a multipart image upload and
-       returns JSON like {"boxes": [{"label": ..., "x":..,"y":..,"width":..,
-       "height":..,"score":..}, ...]} where coordinates are absolute pixels.
-    2. A locally-installed torchvision Faster R-CNN model (used when no
-       endpoint is provided and torchvision is importable).
+    ``module`` selects the detection model: ``cutter_detect`` (dual-model
+    cutter/lost/nozzle/ring_out detection) or ``blade_crop``.
+
+    Detections scoring at or above ``threshold`` are returned as ``boxes``.
+    Detections in ``[candidate_threshold, threshold)`` are returned as
+    ``candidates`` — shown to the user, who accepts them into the annotation
+    set by clicking or leaves them to be ignored.
     """
     image_path = os.path.join(image_folder, payload.image)
     if not os.path.exists(image_path):
         raise HTTPException(status_code=404, detail="image not found")
+    if payload.module not in orchestrator_client.DETECT_MODULES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown module '{payload.module}'. "
+                   f"Available: {sorted(orchestrator_client.DETECT_MODULES)}")
+    if payload.candidate_threshold > payload.threshold:
+        raise HTTPException(status_code=400,
+                            detail="candidate_threshold must not exceed threshold")
 
-    endpoint = payload.endpoint or _load_config().get("auto_endpoint") or os.getenv("MODEL_URL")
-
-    if endpoint:
-        try:
-            if "/v1/models/" in endpoint:
-                boxes = _tfserving_detect(image_path, endpoint, payload.threshold)
-            else:
-                boxes = _remote_detect(image_path, endpoint, payload.threshold)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502,
-                                detail=f"remote model failed: {exc}")
-    else:
-        try:
-            boxes = _local_detect(image_path, payload.threshold)
-        except ModuleNotFoundError:
-            raise HTTPException(
-                status_code=503,
-                detail=("No auto-detection model available. Install torchvision "
-                        "or provide a model endpoint in detect_config.json."),
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500,
-                                detail=f"local model failed: {exc}")
-
-    return {"boxes": boxes}
-
-
-_CUTTER_CLASS_LABELS = {1: "nozzles", 3: "cutter", 4: "ro"}
-
-
-def _tfserving_detect(image_path: str, endpoint: str, threshold: float) -> List[Dict[str, Any]]:
-    """Send a prediction request in TFServing base64-JSON format and parse the response."""
-    import requests
-    with open(image_path, "rb") as fh:
-        encoded = base64.b64encode(fh.read()).decode("utf-8")
-    key = os.path.basename(image_path)
-    payload = {
-        "instances": [{"image_bytes": {"b64": encoded}, "key": key}]
-    }
-    resp = requests.post(endpoint, data=json.dumps(payload), timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
     try:
-        pred = data["predictions"][0]
-    except (KeyError, IndexError):
-        return []
-    with Image.open(image_path) as img:
-        img_w, img_h = img.size
-    boxes = []
-    det_boxes = pred.get("detection_boxes", [])
-    det_scores = pred.get("detection_scores", [])
-    det_classes_text = pred.get("detection_classes_as_text", [])
-    det_classes = pred.get("detection_classes", [])
-    labels = det_classes_text if det_classes_text else [
-        _CUTTER_CLASS_LABELS.get(int(c), f"class_{int(c)}") for c in det_classes
+        img_w, img_h = _image_dimensions(payload.image)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"could not read image: {exc}")
+
+    try:
+        detections, warning = orchestrator_client.detect(
+            payload.module, image_path, payload.image, img_w, img_h)
+    except orchestrator_client.OrchestratorError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    boxes = [d for d in detections if d["score"] >= payload.threshold]
+    candidates = [
+        d for d in detections
+        if payload.candidate_threshold <= d["score"] < payload.threshold
     ]
-    for box, score, label in zip(det_boxes, det_scores, labels):
-        score = float(score)
-        if score < threshold:
-            continue
-        ymin, xmin, ymax, xmax = box
-        x = float(xmin) * img_w
-        y = float(ymin) * img_h
-        w = (float(xmax) - float(xmin)) * img_w
-        h = (float(ymax) - float(ymin)) * img_h
-        boxes.append({"label": label, "x": x, "y": y, "width": w, "height": h, "score": score})
-    return boxes
+    return {"boxes": boxes, "candidates": candidates, "warning": warning}
 
 
-def _remote_detect(image_path: str, endpoint: str, threshold: float) -> List[Dict[str, Any]]:
-    import requests  # imported lazily to keep requests optional
-
-    with open(image_path, "rb") as fh:
-        files = {"file": (os.path.basename(image_path), fh, "application/octet-stream")}
-        resp = requests.post(endpoint, files=files, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    raw_boxes = data.get("boxes", data if isinstance(data, list) else [])
-    boxes = []
-    for b in raw_boxes:
-        score = b.get("score")
-        if score is not None and score < threshold:
-            continue
-        # Accept either x/y/width/height or xmin/ymin/xmax/ymax shapes.
-        if "xmin" in b:
-            x = float(b["xmin"])
-            y = float(b["ymin"])
-            w = float(b["xmax"]) - x
-            h = float(b["ymax"]) - y
-        else:
-            x = float(b["x"])
-            y = float(b["y"])
-            w = float(b["width"])
-            h = float(b["height"])
-        boxes.append({
-            "label": str(b.get("label", "object")),
-            "x": x, "y": y, "width": w, "height": h,
-            "score": float(score) if score is not None else None,
-        })
-    return boxes
+# ---------------------------------------------------------------------------
+# Image editing (rotate / crop)
+# ---------------------------------------------------------------------------
+class CropRect(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
 
 
-_LOCAL_MODEL = None
-_LOCAL_LABELS = None
+class ImageEditRequest(BaseModel):
+    image: str
+    rotate: int = 0  # clockwise degrees: -90, 0, 90, 180, 270
+    crop: Optional[CropRect] = None
 
 
-def _local_detect(image_path: str, threshold: float) -> List[Dict[str, Any]]:
-    global _LOCAL_MODEL, _LOCAL_LABELS
-    import torch  # type: ignore
-    import torchvision  # type: ignore
-    from torchvision.transforms import functional as TF  # type: ignore
-
-    if _LOCAL_MODEL is None:
-        weights = torchvision.models.detection.FasterRCNN_ResNet50_FPN_Weights.DEFAULT
-        _LOCAL_MODEL = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=weights)
-        _LOCAL_MODEL.eval()
-        _LOCAL_LABELS = weights.meta["categories"]
-
-    with Image.open(image_path).convert("RGB") as img:
-        tensor = TF.to_tensor(img)
-    with torch.no_grad():
-        outputs = _LOCAL_MODEL([tensor])[0]
-
-    boxes = []
-    for box, score, label_id in zip(outputs["boxes"], outputs["scores"], outputs["labels"]):
-        s = float(score)
-        if s < threshold:
-            continue
-        x1, y1, x2, y2 = [float(v) for v in box.tolist()]
-        boxes.append({
-            "label": _LOCAL_LABELS[int(label_id)],
-            "x": x1, "y": y1,
-            "width": x2 - x1, "height": y2 - y1,
-            "score": s,
-        })
-    return boxes
+def _rotate_box(b: Dict[str, Any], rotate: int, w: float, h: float) -> Dict[str, Any]:
+    """Map a box through a clockwise rotation of the (w, h) image."""
+    x, y, bw, bh = b["x"], b["y"], b["width"], b["height"]
+    if rotate == 90:
+        return {**b, "x": h - y - bh, "y": x, "width": bh, "height": bw}
+    if rotate == 180:
+        return {**b, "x": w - x - bw, "y": h - y - bh}
+    if rotate == 270:
+        return {**b, "x": y, "y": w - x - bw, "width": bh, "height": bw}
+    return b
 
 
-def _load_config() -> Dict[str, Any]:
-    if not os.path.exists(CONFIG_PATH):
-        return {}
+def _crop_box(b: Dict[str, Any], cx: float, cy: float,
+              cw: float, ch: float) -> Optional[Dict[str, Any]]:
+    """Shift a box into the crop's coordinate space, clipping to its bounds;
+    boxes left smaller than 2px are dropped."""
+    x1 = max(b["x"] - cx, 0.0)
+    y1 = max(b["y"] - cy, 0.0)
+    x2 = min(b["x"] + b["width"] - cx, cw)
+    y2 = min(b["y"] + b["height"] - cy, ch)
+    if x2 - x1 < 2 or y2 - y1 < 2:
+        return None
+    return {**b, "x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+
+
+@app.post("/api/detect/edit")
+def api_edit_image(payload: ImageEditRequest):
+    """
+    Rotate and/or crop an image, saving the result as an edited copy in the
+    same folder (<base>_edited.<ext>; an already-edited image is overwritten
+    in place). Saved boxes and candidates are mapped into the edited image's
+    coordinates. The original is kept, but disappears from the image lists
+    unless it carries saved boxes of its own.
+
+    Rotation is applied first, so crop coordinates are in the rotated image's
+    pixel space (which is what the UI shows when both are combined).
+    """
+    image_path = os.path.join(image_folder, payload.image)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="image not found")
+    rotate = payload.rotate % 360
+    if rotate not in (0, 90, 180, 270):
+        raise HTTPException(status_code=400, detail="rotate must be a multiple of 90")
+    if rotate == 0 and payload.crop is None:
+        raise HTTPException(status_code=400, detail="nothing to do: no rotation or crop given")
+
+    annotation = _read_annotation(payload.image)
+    boxes = list(annotation.get("boxes") or [])
+    candidates = list(annotation.get("candidates") or [])
+
+    with Image.open(image_path) as img:
+        im = ImageOps.exif_transpose(img)
+        w, h = im.size
+
+        if rotate:
+            transpose = {90: Image.Transpose.ROTATE_270,
+                         180: Image.Transpose.ROTATE_180,
+                         270: Image.Transpose.ROTATE_90}[rotate]
+            im = im.transpose(transpose)
+            boxes = [_rotate_box(b, rotate, w, h) for b in boxes]
+            candidates = [_rotate_box(b, rotate, w, h) for b in candidates]
+            w, h = im.size
+
+        if payload.crop is not None:
+            cx = max(0, int(round(payload.crop.x)))
+            cy = max(0, int(round(payload.crop.y)))
+            cx2 = min(w, int(round(payload.crop.x + payload.crop.width)))
+            cy2 = min(h, int(round(payload.crop.y + payload.crop.height)))
+            if cx2 - cx < 8 or cy2 - cy < 8:
+                raise HTTPException(status_code=400, detail="crop region is too small")
+            im = im.crop((cx, cy, cx2, cy2))
+            cw, ch = float(cx2 - cx), float(cy2 - cy)
+            boxes = [t for b in boxes if (t := _crop_box(b, cx, cy, cw, ch))]
+            candidates = [t for b in candidates if (t := _crop_box(b, cx, cy, cw, ch))]
+            w, h = im.size
+
+        target = _edited_target_name(image_folder, payload.image)
+        target_path = os.path.join(image_folder, target)
+        if os.path.splitext(target)[1].lower() in {".jpg", ".jpeg"} and im.mode != "RGB":
+            im = im.convert("RGB")
+        im.save(target_path)
+
+    target_ann = _annotation_path(target)
+    if boxes or candidates:
+        with open(target_ann, "w", encoding="utf-8") as fh:
+            json.dump({
+                "image": target,
+                "boxes": boxes,
+                "candidates": candidates,
+                "image_width": w,
+                "image_height": h,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, fh, indent=2)
+    elif os.path.exists(target_ann):
+        os.remove(target_ann)
+
+    return {"ok": True, "image": target,
+            "boxes": len(boxes), "candidates": len(candidates)}
+
+
+# ---------------------------------------------------------------------------
+# Classification modules (cutter_wear, wear_type) via the orchestrator
+# ---------------------------------------------------------------------------
+class ClassifyPredictRequest(BaseModel):
+    image: str
+    module: str
+
+
+class ClassifyAssignRequest(BaseModel):
+    image: str
+    module: str
+    label: str
+
+
+def _validate_classify_module(module: str) -> None:
+    if module not in orchestrator_client.CLASSIFY_MODULES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown module '{module}'. "
+                   f"Available: {sorted(orchestrator_client.CLASSIFY_MODULES)}")
+
+
+def _module_sorted_dir(module: str) -> str:
+    return os.path.join(UPLOAD_FOLDER, module)
+
+
+@app.get("/classify", response_class=HTMLResponse)
+async def classify_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "classify.html",
+        {"modules": sorted(orchestrator_client.CLASSIFY_MODULES)},
+    )
+
+
+@app.get("/api/classify/state")
+def api_classify_state(module: str):
+    """Remaining images plus per-label counts already sorted for a module."""
+    _validate_classify_module(module)
+    counts: Dict[str, int] = {}
+    module_dir = _module_sorted_dir(module)
+    if os.path.isdir(module_dir):
+        for label in sorted(os.listdir(module_dir)):
+            label_dir = os.path.join(module_dir, label)
+            if os.path.isdir(label_dir):
+                counts[label] = len(_list_images(label_dir))
+    images = _list_active_images(image_folder)
+    return {
+        "module": module,
+        "images": [{"name": name, "url": f"/source_files/{quote(name)}"}
+                   for name in images],
+        "remaining": len(images),
+        "counts": counts,
+    }
+
+
+@app.post("/api/classify/predict")
+def api_classify_predict(payload: ClassifyPredictRequest):
+    """Ask the orchestrator to classify one image with the selected module."""
+    _validate_classify_module(payload.module)
+    image_path = os.path.join(image_folder, payload.image)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="image not found")
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:
-        return {}
+        result = orchestrator_client.classify(payload.module, image_path, payload.image)
+    except orchestrator_client.OrchestratorError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"module": payload.module, "image": payload.image, **result}
+
+
+@app.post("/api/classify/assign")
+def api_classify_assign(payload: ClassifyAssignRequest):
+    """Move an image into sorted_files/<module>/<label>/."""
+    _validate_classify_module(payload.module)
+    label = payload.label.strip()
+    if not label or label in {".", ".."} or any(c in label for c in "/\\\0"):
+        raise HTTPException(status_code=400, detail="invalid label")
+    image_name = os.path.basename(payload.image)
+    image_path = os.path.join(image_folder, image_name)
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="image not found")
+
+    target_dir = os.path.join(_module_sorted_dir(payload.module), label)
+    os.makedirs(target_dir, exist_ok=True)
+    shutil.move(image_path, os.path.join(target_dir, image_name))
+    return {"ok": True, "image": image_name, "module": payload.module, "label": label}
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +560,7 @@ def _load_config() -> Dict[str, Any]:
 def _collect_annotations() -> List[Dict[str, Any]]:
     """Return a list of {image, path, width, height, boxes} for all annotated images."""
     results = []
-    for name in _list_images(image_folder):
+    for name in _list_active_images(image_folder):
         ann_path = _annotation_path(name)
         if not os.path.exists(ann_path):
             continue
