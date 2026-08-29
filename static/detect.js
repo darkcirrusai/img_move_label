@@ -97,10 +97,7 @@ function renderImageList() {
             if (state.current && state.current.name === img.name) {
                 li.classList.add("active");
             }
-            li.addEventListener("click", () => {
-                if (state.dirty && !confirm("Discard unsaved changes?")) return;
-                selectImage(img);
-            });
+            li.addEventListener("click", () => selectImage(img));
             list.appendChild(li);
         });
     updateProgress();
@@ -570,7 +567,6 @@ async function saveAnnotation() {
 
 function clearAll() {
     if (!state.boxes.length && !state.candidates.length) return;
-    if (!confirm("Remove all boxes and candidates on this image?")) return;
     state.boxes = [];
     state.candidates = [];
     state.selected = -1;
@@ -581,7 +577,6 @@ function clearAll() {
 
 function nextImage(delta) {
     if (!state.current) return;
-    if (state.dirty && !confirm("Discard unsaved changes?")) return;
     const idx = state.images.findIndex((i) => i.name === state.current.name);
     const nextIdx = (idx + delta + state.images.length) % state.images.length;
     selectImage(state.images[nextIdx]);
@@ -690,16 +685,6 @@ el("gcp-export-btn").addEventListener("click", async () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-});
-
-// ---------------------------------------------------------------------------
-// Warn on unload if dirty
-// ---------------------------------------------------------------------------
-window.addEventListener("beforeunload", (e) => {
-    if (state.dirty) {
-        e.preventDefault();
-        e.returnValue = "";
-    }
 });
 
 // ---------------------------------------------------------------------------
